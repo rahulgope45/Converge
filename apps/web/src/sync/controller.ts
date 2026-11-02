@@ -64,6 +64,14 @@ export class IncidentSyncController {
     pendingCount: 0,
     lastServerSequence: 0,
   };
+  private readonly handleOffline = () => {
+    this.socket?.close(1001, "network offline");
+    void this.enqueue(async () => {
+      await this.refreshSnapshot("offline");
+      this.scheduleReconnect();
+    });
+  };
+  private readonly handleOnline = () => this.retry();
 
   constructor(private readonly documentId: string) {}
 
@@ -74,6 +82,8 @@ export class IncidentSyncController {
   }
 
   start(): void {
+    window.addEventListener("offline", this.handleOffline);
+    window.addEventListener("online", this.handleOnline);
     void this.enqueue(async () => {
       this.actorId = await getActorId();
       this.replica =
@@ -87,10 +97,25 @@ export class IncidentSyncController {
 
   stop(): void {
     this.stopped = true;
+    window.removeEventListener("offline", this.handleOffline);
+    window.removeEventListener("online", this.handleOnline);
     if (this.retryTimer !== undefined) {
       window.clearTimeout(this.retryTimer);
     }
     this.socket?.close(1000, "controller stopped");
+  }
+
+  retry(): void {
+    if (this.stopped) {
+      return;
+    }
+
+    if (this.retryTimer !== undefined) {
+      window.clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
+    this.retryAttempt = 0;
+    void this.enqueue(() => this.synchronize());
   }
 
   change(change: LocalChange): void {

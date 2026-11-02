@@ -148,6 +148,15 @@ export default function App() {
           <p className="document-id">{documentId}</p>
         </div>
         <div className="room-actions">
+          {(snapshot.connection === "offline" ||
+            snapshot.connection === "error") && (
+            <button
+              className="secondary-button"
+              onClick={() => controller?.retry()}
+            >
+              Refresh connection
+            </button>
+          )}
           <button className="secondary-button" onClick={handleShare}>
             {shareState === "copied" ? "Link copied" : "Share room"}
           </button>
