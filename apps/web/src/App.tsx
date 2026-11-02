@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { ConnectionBadge } from "./components/ConnectionBadge.js";
 import { IncidentEditor } from "./components/IncidentEditor.js";
@@ -10,6 +10,24 @@ import {
 
 function documentIdFromPath(): string | undefined {
   return window.location.pathname.match(/^\/incidents\/([^/]+)$/)?.[1];
+}
+
+const documentIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function documentIdFromRoomInput(value: string): string | undefined {
+  const input = value.trim();
+  if (documentIdPattern.test(input)) {
+    return input;
+  }
+
+  try {
+    const url = new URL(input);
+    const id = url.pathname.match(/^\/incidents\/([^/]+)\/?$/)?.[1];
+    return id && documentIdPattern.test(id) ? id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export default function App() {
@@ -25,6 +43,11 @@ export default function App() {
   });
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string>();
+  const [roomInput, setRoomInput] = useState("");
+  const [joinError, setJoinError] = useState<string>();
+  const [shareState, setShareState] = useState<"idle" | "copied" | "error">(
+    "idle",
+  );
 
   useEffect(() => {
     if (!controller) {
@@ -50,6 +73,28 @@ export default function App() {
     }
   }
 
+  function handleJoin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const id = documentIdFromRoomInput(roomInput);
+    if (!id) {
+      setJoinError("Paste a valid room link or room ID.");
+      return;
+    }
+
+    setJoinError(undefined);
+    window.location.assign(`/incidents/${id}`);
+  }
+
+  async function handleShare() {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setShareState("copied");
+      window.setTimeout(() => setShareState("idle"), 2_000);
+    } catch {
+      setShareState("error");
+    }
+  }
+
   if (!documentId) {
     return (
       <main className="shell shell--landing">
@@ -60,10 +105,37 @@ export default function App() {
           Converge preserves offline edits and deterministically merges concurrent
           incident updates after reconnecting.
         </p>
-        <button className="primary-button" disabled={creating} onClick={handleCreate}>
-          {creating ? "Creating…" : "Create an incident"}
-        </button>
-        {createError && <p className="error-message">{createError}</p>}
+        <div className="landing-actions">
+          <div>
+            <button
+              className="primary-button"
+              disabled={creating}
+              onClick={handleCreate}
+            >
+              {creating ? "Creating…" : "Create a room"}
+            </button>
+            {createError && <p className="error-message">{createError}</p>}
+          </div>
+
+          <div className="join-card">
+            <p>Already have a room?</p>
+            <form className="join-form" onSubmit={handleJoin}>
+              <input
+                aria-label="Room link or room ID"
+                placeholder="Paste room link or ID"
+                value={roomInput}
+                onChange={(event) => {
+                  setRoomInput(event.target.value);
+                  setJoinError(undefined);
+                }}
+              />
+              <button className="secondary-button" type="submit">
+                Join room
+              </button>
+            </form>
+            {joinError && <p className="error-message">{joinError}</p>}
+          </div>
+        </div>
       </main>
     );
   }
@@ -75,8 +147,19 @@ export default function App() {
           <p className="eyebrow">Converge incident room</p>
           <p className="document-id">{documentId}</p>
         </div>
-        <ConnectionBadge state={snapshot.connection} />
+        <div className="room-actions">
+          <button className="secondary-button" onClick={handleShare}>
+            {shareState === "copied" ? "Link copied" : "Share room"}
+          </button>
+          <ConnectionBadge state={snapshot.connection} />
+        </div>
       </header>
+
+      {shareState === "error" && (
+        <p className="error-message">
+          Could not copy the link. Copy it from the address bar instead.
+        </p>
+      )}
 
       {snapshot.incident ? (
         <IncidentEditor

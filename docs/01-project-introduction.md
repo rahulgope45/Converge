@@ -243,6 +243,7 @@ Implemented:
 - Deterministic Lamport-time and actor-ID conflict resolution
 - Duplicate operation protection and projection
 - React/Vite incident editor with IndexedDB offline storage
+- Room creation, share-link copying, and join-by-link or join-by-ID flows
 - Service-worker application shell caching for offline deep-link reloads
 - Pending-operation submission, catch-up, and reconnect controller
 - Go HTTP API, PostgreSQL store, and WebSocket broadcast hub

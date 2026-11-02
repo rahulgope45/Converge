@@ -526,7 +526,7 @@ Everything else may be manually verified during fast-track development.
 
 - Use a clean neutral layout.
 - Make connection status visible.
-- Add a button to copy the incident URL.
+- Add a button to copy the incident URL. Implemented.
 - Add a development-only network simulation control only if time remains.
 - Write a README with architecture, demo steps, known limitations, and screenshots.
 - Record a short video showing offline edits and convergence.

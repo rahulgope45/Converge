@@ -8,6 +8,7 @@ Converge is a local-first collaborative incident-response workspace. Browser rep
 - Lamport logical clocks with deterministic actor-ID tie-breaking
 - Duplicate operation protection
 - React/Vite incident editor
+- Share-room link copying and join-room navigation
 - IndexedDB replica and pending-operation storage
 - Service-worker application shell for full offline reloads
 - HTTP catch-up and durable operation submission
