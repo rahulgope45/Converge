@@ -13,6 +13,26 @@ export type Incident = {
   severity: IncidentSeverity;
 };
 
+export type Version = {
+  logicalTime: number;
+  actorId: string;
+};
+
+export type Register<T> = {
+  value: T;
+  version: Version;
+};
+
+export type IncidentReplica = {
+  documentId: string;
+  title: Register<string>;
+  status: Register<IncidentStatus>;
+  severity: Register<IncidentSeverity>;
+  localClock: number;
+  lastServerSequence: number;
+  appliedOperationIds: readonly string[];
+};
+
 type OperationMetadata = {
   operationId: string;
   documentId: string;
