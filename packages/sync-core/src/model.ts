@@ -1,16 +1,6 @@
-export type IncidentStatus =
-  | "investigating"
-  | "identified"
-  | "monitoring"
-  | "resolved";
-
-export type IncidentSeverity = "SEV1" | "SEV2" | "SEV3";
-
-export type Incident = {
+export type Document = {
   id: string;
-  title: string;
-  status: IncidentStatus;
-  severity: IncidentSeverity;
+  text: string;
 };
 
 export type Version = {
@@ -23,39 +13,21 @@ export type Register<T> = {
   version: Version;
 };
 
-export type IncidentReplica = {
+export type DocumentReplica = {
   documentId: string;
-  title: Register<string>;
-  status: Register<IncidentStatus>;
-  severity: Register<IncidentSeverity>;
+  text: Register<string>;
   localClock: number;
   lastServerSequence: number;
   appliedOperationIds: readonly string[];
 };
 
-type OperationMetadata = {
+export type SetTextOperation = {
   operationId: string;
   documentId: string;
   actorId: string;
   logicalTime: number;
-};
-
-export type SetTitleOperation = OperationMetadata & {
-  kind: "set_title";
+  kind: "set_text";
   value: string;
 };
 
-export type SetStatusOperation = OperationMetadata & {
-  kind: "set_status";
-  value: IncidentStatus;
-};
-
-export type SetSeverityOperation = OperationMetadata & {
-  kind: "set_severity";
-  value: IncidentSeverity;
-};
-
-export type Operation =
-  | SetTitleOperation
-  | SetStatusOperation
-  | SetSeverityOperation;
+export type Operation = SetTextOperation;

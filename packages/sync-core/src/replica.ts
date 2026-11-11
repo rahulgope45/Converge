@@ -1,27 +1,23 @@
-import type { Incident, IncidentReplica, Version } from "./model.js";
+import type { Document, DocumentReplica, Version } from "./model.js";
 
 const initialVersion: Version = {
   logicalTime: 0,
   actorId: "",
 };
 
-export function createReplica(incident: Incident): IncidentReplica {
+export function createReplica(document: Document): DocumentReplica {
   return {
-    documentId: incident.id,
-    title: { value: incident.title, version: initialVersion },
-    status: { value: incident.status, version: initialVersion },
-    severity: { value: incident.severity, version: initialVersion },
+    documentId: document.id,
+    text: { value: document.text, version: initialVersion },
     localClock: 0,
     lastServerSequence: 0,
     appliedOperationIds: [],
   };
 }
 
-export function projectIncident(replica: IncidentReplica): Incident {
+export function projectDocument(replica: DocumentReplica): Document {
   return {
     id: replica.documentId,
-    title: replica.title.value,
-    status: replica.status.value,
-    severity: replica.severity.value,
+    text: replica.text.value,
   };
 }

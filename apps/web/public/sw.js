@@ -1,4 +1,4 @@
-const CACHE_NAME = "converge-app-shell-v1";
+const CACHE_NAME = "converge-app-shell-v2";
 const APP_SHELL = ["/", "/index.html"];
 
 self.addEventListener("install", (event) => {

@@ -2,11 +2,11 @@ import {
   applyOperation,
   createLocalOperation,
   createReplica,
-  projectIncident,
+  projectDocument,
 } from "@converge/sync-core";
 import type {
-  Incident,
-  IncidentReplica,
+  Document,
+  DocumentReplica,
   LocalChange,
   Operation,
 } from "@converge/sync-core";
@@ -34,34 +34,36 @@ export type ConnectionState =
   | "error";
 
 export type SyncSnapshot = {
-  incident?: Incident;
+  document?: Document;
   connection: ConnectionState;
   pendingCount: number;
+  // Local changes accepted by change() that are not yet applied to the replica.
+  queuedLocalChanges: number;
   lastServerSequence: number;
   error?: string;
 };
 
 type Listener = (snapshot: SyncSnapshot) => void;
 
-const initialIncident = (documentId: string): Incident => ({
+const initialDocument = (documentId: string): Document => ({
   id: documentId,
-  title: "Untitled incident",
-  status: "investigating",
-  severity: "SEV3",
+  text: "",
 });
 
-export class IncidentSyncController {
+export class DocumentSyncController {
   private actorId = "";
-  private replica?: IncidentReplica;
+  private replica?: DocumentReplica;
   private socket?: WebSocket;
   private stopped = false;
   private retryAttempt = 0;
+  private queuedLocalChanges = 0;
   private retryTimer?: number;
   private queue: Promise<void> = Promise.resolve();
   private readonly listeners = new Set<Listener>();
   private snapshot: SyncSnapshot = {
     connection: "loading",
     pendingCount: 0,
+    queuedLocalChanges: 0,
     lastServerSequence: 0,
   };
   private readonly handleOffline = () => {
@@ -88,7 +90,7 @@ export class IncidentSyncController {
       this.actorId = await getActorId();
       this.replica =
         (await loadReplica(this.documentId)) ??
-        createReplica(initialIncident(this.documentId));
+        createReplica(initialDocument(this.documentId));
       await saveReplica(this.replica);
       await this.refreshSnapshot("offline");
       await this.synchronize();
@@ -119,12 +121,10 @@ export class IncidentSyncController {
   }
 
   change(change: LocalChange): void {
+    this.queuedLocalChanges += 1;
     void this.enqueue(async () => {
+      this.queuedLocalChanges -= 1;
       if (!this.replica) {
-        return;
-      }
-
-      if (change.kind === "set_title" && change.value.trim().length === 0) {
         return;
       }
 
@@ -197,15 +197,6 @@ export class IncidentSyncController {
     const pending = await listPendingOperations(this.documentId);
     pending.sort((left, right) => left.logicalTime - right.logicalTime);
     for (const operation of pending) {
-      // Older clients could enqueue an empty title while the user was typing.
-      // It is permanently rejected by the API and must not block later changes.
-      if (
-        operation.kind === "set_title" &&
-        operation.value.trim().length === 0
-      ) {
-        await removePendingOperation(operation.operationId);
-        continue;
-      }
       await submitOperation(operation);
       await removePendingOperation(operation.operationId);
       await saveReplica(this.replica);
@@ -294,9 +285,10 @@ export class IncidentSyncController {
       await listPendingOperations(this.documentId)
     ).length;
     this.snapshot = {
-      incident: this.replica ? projectIncident(this.replica) : undefined,
+      document: this.replica ? projectDocument(this.replica) : undefined,
       connection,
       pendingCount,
+      queuedLocalChanges: this.queuedLocalChanges,
       lastServerSequence: this.replica?.lastServerSequence ?? 0,
       error,
     };

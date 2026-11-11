@@ -3,9 +3,10 @@ package protocol
 import "encoding/json"
 
 const (
-	KindSetTitle    = "set_title"
-	KindSetStatus   = "set_status"
-	KindSetSeverity = "set_severity"
+	KindSetText = "set_text"
+
+	// MaxTextLength is counted in Unicode code points.
+	MaxTextLength = 10000
 )
 
 type Operation struct {

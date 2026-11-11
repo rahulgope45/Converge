@@ -1,12 +1,12 @@
 import type { DBSchema, IDBPDatabase } from "idb";
 import { openDB } from "idb";
 
-import type { IncidentReplica, Operation } from "@converge/sync-core";
+import type { DocumentReplica, Operation } from "@converge/sync-core";
 
 interface ConvergeDatabase extends DBSchema {
   replicas: {
     key: string;
-    value: IncidentReplica;
+    value: DocumentReplica;
   };
   pendingOperations: {
     key: string;
@@ -23,18 +23,47 @@ let databasePromise: Promise<IDBPDatabase<ConvergeDatabase>> | undefined;
 
 function database(): Promise<IDBPDatabase<ConvergeDatabase>> {
   if (!databasePromise) {
-    databasePromise = openDB<ConvergeDatabase>("converge", 1, {
-      upgrade(db) {
-        db.createObjectStore("replicas");
-        const pending = db.createObjectStore("pendingOperations", {
-          keyPath: "operationId",
-        });
-        pending.createIndex("documentId", "documentId");
-        db.createObjectStore("settings");
-      },
-    });
+    databasePromise = openDatabase();
   }
   return databasePromise;
+}
+
+function openDatabase(): Promise<IDBPDatabase<ConvergeDatabase>> {
+  return new Promise((resolve, reject) => {
+    const opening = openDB<ConvergeDatabase>("converge", 2, {
+      blocked() {
+        // Another tab still holds the previous database version, so this
+        // open would otherwise wait silently for that tab to close.
+        reject(
+          new Error(
+            "Converge is open in another tab with an older version. Close or reload that tab, then reload this one.",
+          ),
+        );
+      },
+      blocking() {
+        // A newer version of the app is opening the database in another tab.
+        databasePromise = undefined;
+        void opening.then((db) => db.close());
+      },
+      upgrade(db, oldVersion, _newVersion, transaction) {
+        if (oldVersion < 1) {
+          db.createObjectStore("replicas");
+          const pending = db.createObjectStore("pendingOperations", {
+            keyPath: "operationId",
+          });
+          pending.createIndex("documentId", "documentId");
+          db.createObjectStore("settings");
+        }
+        if (oldVersion === 1) {
+          // Version 1 stored replicas and operations in an older shape that
+          // the shared text model cannot read.
+          void transaction.objectStore("replicas").clear();
+          void transaction.objectStore("pendingOperations").clear();
+        }
+      },
+    });
+    opening.then(resolve, reject);
+  });
 }
 
 export async function getActorId(): Promise<string> {
@@ -46,16 +75,16 @@ export async function getActorId(): Promise<string> {
 
 export async function loadReplica(
   documentId: string,
-): Promise<IncidentReplica | undefined> {
+): Promise<DocumentReplica | undefined> {
   return (await database()).get("replicas", documentId);
 }
 
-export async function saveReplica(replica: IncidentReplica): Promise<void> {
+export async function saveReplica(replica: DocumentReplica): Promise<void> {
   await (await database()).put("replicas", replica, replica.documentId);
 }
 
 export async function saveLocalOperation(
-  replica: IncidentReplica,
+  replica: DocumentReplica,
   operation: Operation,
 ): Promise<void> {
   const db = await database();

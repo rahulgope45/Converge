@@ -1,6 +1,6 @@
 import { compareVersion } from "./compare-version.js";
 import type {
-  IncidentReplica,
+  DocumentReplica,
   Operation,
   Register,
   Version,
@@ -19,9 +19,9 @@ function updateRegister<T>(
 }
 
 export function applyOperation(
-  replica: IncidentReplica,
+  replica: DocumentReplica,
   operation: Operation,
-): IncidentReplica {
+): DocumentReplica {
   if (operation.documentId !== replica.documentId) {
     throw new Error(
       `Operation for ${operation.documentId} cannot be applied to ${replica.documentId}`,
@@ -37,7 +37,7 @@ export function applyOperation(
     actorId: operation.actorId,
   };
 
-  const nextReplica: IncidentReplica = {
+  const nextReplica: DocumentReplica = {
     ...replica,
     localClock: Math.max(replica.localClock, operation.logicalTime),
     appliedOperationIds: [
@@ -46,21 +46,14 @@ export function applyOperation(
     ],
   };
 
-  switch (operation.kind) {
-    case "set_title":
-      return {
-        ...nextReplica,
-        title: updateRegister(replica.title, operation.value, version),
-      };
-    case "set_status":
-      return {
-        ...nextReplica,
-        status: updateRegister(replica.status, operation.value, version),
-      };
-    case "set_severity":
-      return {
-        ...nextReplica,
-        severity: updateRegister(replica.severity, operation.value, version),
-      };
+  // Rooms created before the text box hold operations of other kinds.
+  // They are acknowledged so catch-up advances, but they change no state.
+  if (operation.kind !== "set_text") {
+    return nextReplica;
   }
+
+  return {
+    ...nextReplica,
+    text: updateRegister(replica.text, operation.value, version),
+  };
 }

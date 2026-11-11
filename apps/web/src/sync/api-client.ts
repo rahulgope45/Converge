@@ -31,7 +31,7 @@ export async function createDocument(): Promise<string> {
   });
   const body = await response.json();
   if (!response.ok) {
-    throw new Error(body.error?.message ?? "Could not create incident");
+    throw new Error(body.error?.message ?? "Could not create room");
   }
   return body.documentId as string;
 }

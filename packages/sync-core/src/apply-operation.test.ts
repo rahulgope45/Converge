@@ -1,98 +1,75 @@
 import { describe, expect, it } from "vitest";
 
 import { applyOperation } from "./apply-operation.js";
-import type {
-  Incident,
-  SetSeverityOperation,
-  SetStatusOperation,
-  SetTitleOperation,
-} from "./model.js";
-import { createReplica, projectIncident } from "./replica.js";
+import type { Operation, SetTextOperation } from "./model.js";
+import { createReplica, projectDocument } from "./replica.js";
 
-const incident: Incident = {
-  id: "incident-1",
-  title: "Database issue",
-  status: "investigating",
-  severity: "SEV2",
-};
+const replica = createReplica({ id: "doc-1", text: "" });
+
+function op(
+  operationId: string,
+  actorId: string,
+  logicalTime: number,
+  value: string,
+): SetTextOperation {
+  return {
+    operationId,
+    documentId: "doc-1",
+    actorId,
+    logicalTime,
+    kind: "set_text",
+    value,
+  };
+}
 
 describe("applyOperation", () => {
   it("applies an operation without mutating the original replica", () => {
-    const replica = createReplica(incident);
-    const operation: SetTitleOperation = {
-      operationId: "operation-1",
-      documentId: incident.id,
-      actorId: "actor-a",
-      logicalTime: 1,
-      kind: "set_title",
-      value: "Production database outage",
-    };
+    const result = applyOperation(replica, op("op-1", "actor-a", 1, "hello"));
 
-    const result = applyOperation(replica, operation);
-
-    expect(projectIncident(result).title).toBe("Production database outage");
-    expect(projectIncident(replica).title).toBe("Database issue");
+    expect(projectDocument(result).text).toBe("hello");
+    expect(projectDocument(replica).text).toBe("");
     expect(result).not.toBe(replica);
   });
 
-  it("converges despite reordering, duplicates, and concurrent field edits", () => {
-    const statusOperation: SetStatusOperation = {
-      operationId: "operation-status",
-      documentId: incident.id,
+  it("converges despite reordering, duplicates, and a concurrent tie", () => {
+    const early = op("op-early", "actor-a", 1, "first");
+    const loser = op("op-a", "actor-a", 2, "from a");
+    const winner = op("op-b", "actor-b", 2, "from b");
+
+    const a = [early, loser, winner, early].reduce(applyOperation, replica);
+    const b = [winner, early, loser, winner].reduce(applyOperation, replica);
+
+    expect(projectDocument(a)).toEqual(projectDocument(b));
+    expect(projectDocument(a)).toEqual({ id: "doc-1", text: "from b" });
+  });
+
+  it("accepts empty text as a value", () => {
+    const filled = applyOperation(replica, op("op-1", "actor-a", 1, "x"));
+    const cleared = applyOperation(filled, op("op-2", "actor-a", 2, ""));
+
+    expect(projectDocument(cleared).text).toBe("");
+  });
+
+  it("skips operations of an unknown kind without throwing", () => {
+    const legacy = {
+      operationId: "op-old",
+      documentId: "doc-1",
       actorId: "actor-a",
-      logicalTime: 1,
-      kind: "set_status",
-      value: "resolved",
-    };
-    const severityOperation: SetSeverityOperation = {
-      operationId: "operation-severity",
-      documentId: incident.id,
-      actorId: "actor-b",
-      logicalTime: 1,
-      kind: "set_severity",
-      value: "SEV1",
-    };
-    const earlierTitle: SetTitleOperation = {
-      operationId: "operation-title-a",
-      documentId: incident.id,
-      actorId: "actor-a",
-      logicalTime: 2,
+      logicalTime: 7,
       kind: "set_title",
-      value: "Earlier title",
-    };
-    const winningTitle: SetTitleOperation = {
-      operationId: "operation-title-b",
-      documentId: incident.id,
-      actorId: "actor-b",
-      logicalTime: 2,
-      kind: "set_title",
-      value: "Deterministic title",
-    };
+      value: "Old",
+    } as unknown as Operation;
 
-    const operationsA = [
-      statusOperation,
-      earlierTitle,
-      severityOperation,
-      winningTitle,
-      statusOperation,
-    ];
-    const operationsB = [
-      winningTitle,
-      severityOperation,
-      statusOperation,
-      earlierTitle,
-      winningTitle,
-    ];
+    const result = applyOperation(replica, legacy);
 
-    const replicaA = operationsA.reduce(applyOperation, createReplica(incident));
-    const replicaB = operationsB.reduce(applyOperation, createReplica(incident));
+    expect(projectDocument(result).text).toBe("");
+    expect(result.localClock).toBe(7);
+    expect(result.appliedOperationIds).toContain("op-old");
+  });
 
-    expect(projectIncident(replicaA)).toEqual(projectIncident(replicaB));
-    expect(projectIncident(replicaA)).toEqual({
-      id: incident.id,
-      title: "Deterministic title",
-      status: "resolved",
-      severity: "SEV1",
-    });
+  it("rejects an operation for another document", () => {
+    const foreign = { ...op("op-1", "actor-a", 1, "x"), documentId: "doc-2" };
+
+    expect(() => applyOperation(replica, foreign)).toThrow();
   });
 });

@@ -1,6 +1,6 @@
 # Converge
 
-Converge is a local-first collaborative incident-response workspace. Browser replicas apply edits immediately, preserve them offline, and deterministically converge after receiving the same operation set.
+Converge is a local-first shared text box. Browser replicas apply edits immediately, preserve them offline, and deterministically converge after receiving the same operation set.
 
 ## Architecture
 

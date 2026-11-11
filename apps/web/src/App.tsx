@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { ConnectionBadge } from "./components/ConnectionBadge.js";
-import { IncidentEditor } from "./components/IncidentEditor.js";
+import { TextEditor } from "./components/TextEditor.js";
 import { createDocument } from "./sync/api-client.js";
 import {
-  IncidentSyncController,
+  DocumentSyncController,
   type SyncSnapshot,
 } from "./sync/controller.js";
 
 function documentIdFromPath(): string | undefined {
-  return window.location.pathname.match(/^\/incidents\/([^/]+)$/)?.[1];
+  return window.location.pathname.match(/^\/rooms\/([^/]+)$/)?.[1];
 }
 
 const documentIdPattern =
@@ -23,7 +23,7 @@ function documentIdFromRoomInput(value: string): string | undefined {
 
   try {
     const url = new URL(input);
-    const id = url.pathname.match(/^\/incidents\/([^/]+)\/?$/)?.[1];
+    const id = url.pathname.match(/^\/rooms\/([^/]+)\/?$/)?.[1];
     return id && documentIdPattern.test(id) ? id : undefined;
   } catch {
     return undefined;
@@ -33,12 +33,13 @@ function documentIdFromRoomInput(value: string): string | undefined {
 export default function App() {
   const documentId = documentIdFromPath();
   const controller = useMemo(
-    () => (documentId ? new IncidentSyncController(documentId) : undefined),
+    () => (documentId ? new DocumentSyncController(documentId) : undefined),
     [documentId],
   );
   const [snapshot, setSnapshot] = useState<SyncSnapshot>({
     connection: "loading",
     pendingCount: 0,
+    queuedLocalChanges: 0,
     lastServerSequence: 0,
   });
   const [creating, setCreating] = useState(false);
@@ -66,9 +67,9 @@ export default function App() {
     setCreateError(undefined);
     try {
       const id = await createDocument();
-      window.location.assign(`/incidents/${id}`);
+      window.location.assign(`/rooms/${id}`);
     } catch (error) {
-      setCreateError(error instanceof Error ? error.message : "Could not create incident");
+      setCreateError(error instanceof Error ? error.message : "Could not create room");
       setCreating(false);
     }
   }
@@ -82,7 +83,7 @@ export default function App() {
     }
 
     setJoinError(undefined);
-    window.location.assign(`/incidents/${id}`);
+    window.location.assign(`/rooms/${id}`);
   }
 
   async function handleShare() {
@@ -99,11 +100,11 @@ export default function App() {
     return (
       <main className="shell shell--landing">
         <div className="brand-mark">C</div>
-        <p className="eyebrow">Local-first incident response</p>
-        <h1>Keep coordinating, even when the network does not.</h1>
+        <p className="eyebrow">Local-first shared text</p>
+        <h1>Keep writing, even when the network does not.</h1>
         <p className="lede">
-          Converge preserves offline edits and deterministically merges concurrent
-          incident updates after reconnecting.
+          Converge preserves offline edits and deterministically converges every
+          replica's text after reconnecting.
         </p>
         <div className="landing-actions">
           <div>
@@ -144,7 +145,7 @@ export default function App() {
     <main className="shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">Converge incident room</p>
+          <p className="eyebrow">Converge room</p>
           <p className="document-id">{documentId}</p>
         </div>
         <div className="room-actions">
@@ -170,13 +171,14 @@ export default function App() {
         </p>
       )}
 
-      {snapshot.incident ? (
-        <IncidentEditor
-          incident={snapshot.incident}
+      {snapshot.document ? (
+        <TextEditor
+          document={snapshot.document}
+          queuedLocalChanges={snapshot.queuedLocalChanges}
           onChange={(change) => controller?.change(change)}
         />
       ) : (
-        <section className="incident-card">Loading local replica…</section>
+        <section className="editor-card">Loading local replica…</section>
       )}
 
       <section className="sync-panel" aria-label="Synchronization details">

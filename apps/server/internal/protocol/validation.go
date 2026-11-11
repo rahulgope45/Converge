@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -48,30 +49,16 @@ func ValidateOperation(operation Operation) error {
 	}
 
 	switch operation.Kind {
-	case KindSetTitle:
-		var title string
-		if err := json.Unmarshal(operation.Value, &title); err != nil {
-			return errors.New("set_title value must be a string")
+	case KindSetText:
+		var text *string
+		if err := json.Unmarshal(operation.Value, &text); err != nil || text == nil {
+			return errors.New("set_text value must be a string")
 		}
-		title = strings.TrimSpace(title)
-		if title == "" || len(title) > 200 {
-			return errors.New("title must contain 1 to 200 characters")
+		if strings.ContainsRune(*text, 0) {
+			return errors.New("text must not contain NUL characters")
 		}
-	case KindSetStatus:
-		var status string
-		if err := json.Unmarshal(operation.Value, &status); err != nil {
-			return errors.New("set_status value must be a string")
-		}
-		if status != "investigating" && status != "identified" && status != "monitoring" && status != "resolved" {
-			return errors.New("status is not supported")
-		}
-	case KindSetSeverity:
-		var severity string
-		if err := json.Unmarshal(operation.Value, &severity); err != nil {
-			return errors.New("set_severity value must be a string")
-		}
-		if severity != "SEV1" && severity != "SEV2" && severity != "SEV3" {
-			return errors.New("severity is not supported")
+		if utf8.RuneCountInString(*text) > MaxTextLength {
+			return fmt.Errorf("text must contain at most %d characters", MaxTextLength)
 		}
 	default:
 		return errors.New("operation kind is not supported")

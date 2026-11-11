@@ -1,29 +1,19 @@
-import type { IncidentReplica, Operation } from "./model.js";
+import type { DocumentReplica, Operation } from "./model.js";
 
-export type LocalChange =
-  | { kind: "set_title"; value: string }
-  | { kind: "set_status"; value: "investigating" | "identified" | "monitoring" | "resolved" }
-  | { kind: "set_severity"; value: "SEV1" | "SEV2" | "SEV3" };
+export type LocalChange = { kind: "set_text"; value: string };
 
 export function createLocalOperation(
-  replica: IncidentReplica,
+  replica: DocumentReplica,
   actorId: string,
   operationId: string,
   change: LocalChange,
 ): Operation {
-  const metadata = {
+  return {
     operationId,
     documentId: replica.documentId,
     actorId,
     logicalTime: replica.localClock + 1,
+    kind: change.kind,
+    value: change.value,
   };
-
-  switch (change.kind) {
-    case "set_title":
-      return { ...metadata, kind: change.kind, value: change.value };
-    case "set_status":
-      return { ...metadata, kind: change.kind, value: change.value };
-    case "set_severity":
-      return { ...metadata, kind: change.kind, value: change.value };
-  }
 }
