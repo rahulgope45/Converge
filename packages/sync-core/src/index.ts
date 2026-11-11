@@ -1,13 +1,17 @@
+export { anchorAt, indexOfAnchor } from "./anchors.js";
 export { applyOperation } from "./apply-operation.js";
 export { compareVersion } from "./compare-version.js";
-export { createLocalOperation } from "./create-operation.js";
-export { createReplica, projectDocument } from "./replica.js";
-export type { LocalChange } from "./create-operation.js";
+export { createLocalOperations } from "./create-operation.js";
+export { createReplica, projectDocument, textOf } from "./replica.js";
 export type {
+  CharId,
+  DeleteSpan,
+  DeleteTextOperation,
   Document,
   DocumentReplica,
+  Element,
+  InsertTextOperation,
   Operation,
-  Register,
-  SetTextOperation,
+  TextEdit,
   Version,
 } from "./model.js";
