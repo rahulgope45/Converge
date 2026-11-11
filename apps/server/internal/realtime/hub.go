@@ -19,6 +19,10 @@ type client struct {
 	connection *websocket.Conn
 	outbound   chan []byte
 	closeOnce  sync.Once
+
+	// Guarded by Hub.mu. Set once the client has announced itself.
+	actorID  string
+	presence []byte
 }
 
 type Hub struct {
@@ -68,9 +72,15 @@ func (h *Hub) Serve(
 	}()
 
 	for {
-		_, _, err := connection.Read(request.Context())
+		_, data, err := connection.Read(request.Context())
 		if err != nil {
 			return err
+		}
+		// Presence is the only thing clients send. Anything else is ignored
+		// rather than treated as an error, so a confused client keeps its
+		// operation stream.
+		if frame, ok := parsePresence(data); ok {
+			h.updatePresence(documentID, connectedClient, frame)
 		}
 	}
 }
@@ -83,13 +93,25 @@ func (h *Hub) Broadcast(documentID string, operation protocol.StoredOperation) {
 	}
 
 	h.mu.RLock()
+	clients := h.othersLocked(documentID, nil)
+	h.mu.RUnlock()
+
+	h.send(documentID, clients, message)
+}
+
+// othersLocked returns the room's clients except `except`. The caller holds h.mu.
+func (h *Hub) othersLocked(documentID string, except *client) []*client {
 	room := h.clients[documentID]
 	clients := make([]*client, 0, len(room))
 	for connectedClient := range room {
-		clients = append(clients, connectedClient)
+		if connectedClient != except {
+			clients = append(clients, connectedClient)
+		}
 	}
-	h.mu.RUnlock()
+	return clients
+}
 
+func (h *Hub) send(documentID string, clients []*client, message []byte) {
 	for _, connectedClient := range clients {
 		select {
 		case connectedClient.outbound <- message:
@@ -100,9 +122,40 @@ func (h *Hub) Broadcast(documentID string, operation protocol.StoredOperation) {
 	}
 }
 
+// updatePresence remembers a client's latest presence and relays it to the
+// other clients in the room. Presence is never stored.
+func (h *Hub) updatePresence(documentID string, sender *client, frame presenceFrame) {
+	message, err := json.Marshal(frame)
+	if err != nil {
+		h.logger.Error("encode presence", "error", err)
+		return
+	}
+
+	h.mu.Lock()
+	sender.actorID = frame.ActorID
+	sender.presence = message
+	others := h.othersLocked(documentID, sender)
+	h.mu.Unlock()
+
+	h.send(documentID, others, message)
+}
+
 func (h *Hub) register(documentID string, connectedClient *client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	// A newcomer learns who is already here. The outbound queue is empty at
+	// this point; presences beyond its capacity are skipped and arrive with
+	// that peer's next update.
+	for existing := range h.clients[documentID] {
+		if existing.presence == nil {
+			continue
+		}
+		select {
+		case connectedClient.outbound <- existing.presence:
+		default:
+		}
+	}
 
 	if h.clients[documentID] == nil {
 		h.clients[documentID] = make(map[*client]struct{})
@@ -112,12 +165,24 @@ func (h *Hub) register(documentID string, connectedClient *client) {
 
 func (h *Hub) unregister(documentID string, connectedClient *client) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	delete(h.clients[documentID], connectedClient)
 	if len(h.clients[documentID]) == 0 {
 		delete(h.clients, documentID)
 	}
+	actorID := connectedClient.actorID
+	announced := connectedClient.presence != nil
+	others := h.othersLocked(documentID, nil)
+	h.mu.Unlock()
+
+	if !announced {
+		return
+	}
+	message, err := json.Marshal(presenceLeave{Type: frameTypeLeave, ActorID: actorID})
+	if err != nil {
+		h.logger.Error("encode presence leave", "error", err)
+		return
+	}
+	h.send(documentID, others, message)
 }
 
 func (connectedClient *client) writeLoop(ctx context.Context) error {
