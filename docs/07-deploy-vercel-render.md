@@ -74,7 +74,7 @@ Treat both URLs as passwords. Do not paste them into the repository.
 
 ## 3. Create the tables
 
-The server does not create its own tables. Run both migration files once,
+The server does not create its own tables. Run every migration file once,
 in order, against the **External Database URL**.
 
 `psql` is not installed on the development machine, so use the one inside the
@@ -88,6 +88,9 @@ docker run --rm -i postgres:17-alpine psql "$PROD_DB" -v ON_ERROR_STOP=1 \
 
 docker run --rm -i postgres:17-alpine psql "$PROD_DB" -v ON_ERROR_STOP=1 \
   < apps/server/migrations/002_set_text.sql
+
+docker run --rm -i postgres:17-alpine psql "$PROD_DB" -v ON_ERROR_STOP=1 \
+  < apps/server/migrations/003_text_operations.sql
 ```
 
 Verify:
@@ -99,7 +102,7 @@ docker run --rm -i postgres:17-alpine psql "$PROD_DB" -c '\dt'
 Expected: two tables, `documents` and `operations`.
 
 If the connection is refused with an SSL error, append `?sslmode=require` to
-the URL. Both files are safe to run again.
+the URL. All three files are safe to run again.
 
 Whenever a new file is added to `apps/server/migrations/`, run it here the
 same way before deploying the backend that needs it.
@@ -208,7 +211,8 @@ The server refuses browser requests from any origin not on its list.
 2. **Create a room**. You should land on `/rooms/<id>` with the text box and a
    green connection badge.
 3. **Share room**, then open the copied link in a second window.
-4. Type in one window. The text should appear in the other within a second.
+4. Type in one window. The text should appear in the other within a second,
+   and each window should show the other person's coloured caret.
 5. In one window, open DevTools → Network → set throttling to **Offline**.
    Type something. Refresh the page; the text should still be there.
 6. Set throttling back to **No throttling**. The other window should receive
@@ -247,7 +251,7 @@ The server refuses browser requests from any origin not on its list.
 | First load hangs for up to a minute, then works | The free backend was asleep | Expected. See step 8 |
 | Render deploy fails with "DATABASE_URL is required" | The variable is not set on the web service | Step 4.3 |
 | Render logs show "ping PostgreSQL" errors | Wrong URL, or database and service are in different regions | Use the Internal URL and the same region |
-| Typing gives "Could not submit operation" and Render logs mention `operations_kind_check` | Migration `002` was not run | Step 3 |
+| Typing gives "Could not submit operations" and Render logs mention `operations_kind_check` | Migration `003` was not run | Step 3 |
 | Render logs say relation `documents` does not exist | Migration `001` was not run | Step 3 |
 | Vercel build fails to find `@converge/sync-core` | Files outside the root directory are excluded | Step 5.3 |
 | Refreshing `/rooms/<id>` gives a Vercel 404 | Root Directory is not `apps/web`, so `vercel.json` is not used | Step 5.3 |
