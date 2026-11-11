@@ -240,12 +240,97 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(37, 130, 95, 0.12);
 }
 
-textarea {
-  min-height: 240px;
+.editor-stack {
+  position: relative;
+  display: grid;
+}
+
+/* Shared by the textarea and the caret overlay. Every property here affects
+   where text wraps, so the two layers must not differ in any of them. */
+.editor-surface {
+  width: 100%;
+  margin: 0;
+  border: 1px solid #cdd7d1;
+  border-radius: 11px;
+  padding: 12px 13px;
+  font: inherit;
   font-size: 16px;
   font-weight: 400;
   line-height: 1.55;
+  letter-spacing: normal;
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  scrollbar-gutter: stable;
+}
+
+textarea.editor-surface {
+  min-height: 240px;
+  overflow-y: auto;
   resize: vertical;
+}
+
+.caret-overlay {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-color: transparent;
+  color: transparent;
+  background: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+
+.remote-caret {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 1.25em;
+  vertical-align: text-bottom;
+  outline: 1px solid var(--caret-color);
+}
+
+.remote-caret__label {
+  position: absolute;
+  bottom: 100%;
+  left: -1px;
+  border-radius: 4px 4px 4px 0;
+  padding: 1px 5px;
+  color: white;
+  background: var(--caret-color);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.presence-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.presence-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(35, 64, 51, 0.14);
+  border-radius: 999px;
+  padding: 4px 11px 4px 8px;
+  color: #33413a;
+  background: rgba(255, 255, 255, 0.88);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.presence-chip__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--chip-color);
 }
 
 .sync-panel {

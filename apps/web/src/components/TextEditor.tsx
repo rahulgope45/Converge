@@ -1,61 +1,57 @@
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef } from "react";
 
-import type { Document, LocalChange } from "@converge/sync-core";
+import type { PeerView } from "../sync/controller.js";
+import { CaretOverlay } from "./CaretOverlay.js";
 
-import { nextDraft, sanitizeText } from "./draft.js";
-
-const COMMIT_DELAY_MS = 300;
 const MAX_TEXT_LENGTH = 10_000;
 
 type TextEditorProps = {
-  document: Document;
-  queuedLocalChanges: number;
-  onChange: (change: LocalChange) => void;
+  text: string;
+  // Where the user's selection belongs in `text`, as UTF-16 offsets.
+  selection?: { start: number; end: number };
+  peers: readonly PeerView[];
+  onEdit: (text: string, caret: number) => void;
+  onSelect: (start: number, end: number) => void;
 };
 
 export function TextEditor({
-  document,
-  queuedLocalChanges,
-  onChange,
+  text,
+  selection,
+  peers,
+  onEdit,
+  onSelect,
 }: TextEditorProps) {
-  const [draft, setDraft] = useState(document.text);
-  const draftRef = useRef(document.text);
-  const lastCommittedRef = useRef(document.text);
-  const timerRef = useRef<number | undefined>(undefined);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
-  const clearTimer = () => {
-    if (timerRef.current !== undefined) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = undefined;
+  // When someone else changes the text, the browser would leave the caret at
+  // its old numeric position (or jump to the end). Put it back on the
+  // characters it was on.
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || !selection || document.activeElement !== textarea) {
+      return;
+    }
+    if (
+      textarea.selectionStart !== selection.start ||
+      textarea.selectionEnd !== selection.end
+    ) {
+      textarea.setSelectionRange(selection.start, selection.end);
+    }
+  }, [text, selection?.start, selection?.end]);
+
+  const syncScroll = () => {
+    if (textareaRef.current && overlayRef.current) {
+      overlayRef.current.scrollTop = textareaRef.current.scrollTop;
     }
   };
 
-  useEffect(() => {
-    const next = nextDraft({
-      draft: draftRef.current,
-      lastCommitted: lastCommittedRef.current,
-      incoming: document.text,
-      queuedLocalChanges,
-    });
-    if (queuedLocalChanges === 0) {
-      lastCommittedRef.current = document.text;
-    }
-    draftRef.current = next;
-    setDraft(next);
-  }, [document.id, document.text, queuedLocalChanges]);
+  useLayoutEffect(syncScroll);
 
-  useEffect(() => clearTimer, []);
-
-  const commit = () => {
-    clearTimer();
-    const value = sanitizeText(draftRef.current);
-    if (value !== draftRef.current) {
-      draftRef.current = value;
-      setDraft(value);
-    }
-    if (value !== lastCommittedRef.current) {
-      lastCommittedRef.current = value;
-      onChange({ kind: "set_text", value });
+  const reportSelection = () => {
+    const textarea = textareaRef.current;
+    if (textarea) {
+      onSelect(textarea.selectionStart, textarea.selectionEnd);
     }
   };
 
@@ -63,19 +59,26 @@ export function TextEditor({
     <section className="editor-card">
       <label>
         <span>Shared text</span>
-        <textarea
-          value={draft}
-          maxLength={MAX_TEXT_LENGTH}
-          rows={14}
-          placeholder="Start typing…"
-          onChange={(event) => {
-            draftRef.current = event.target.value;
-            setDraft(event.target.value);
-            clearTimer();
-            timerRef.current = window.setTimeout(commit, COMMIT_DELAY_MS);
-          }}
-          onBlur={commit}
-        />
+        <div className="editor-stack">
+          <textarea
+            ref={textareaRef}
+            className="editor-surface"
+            value={text}
+            maxLength={MAX_TEXT_LENGTH}
+            rows={14}
+            placeholder="Start typing…"
+            spellCheck={false}
+            onChange={(event) =>
+              onEdit(event.target.value, event.target.selectionStart)
+            }
+            onSelect={reportSelection}
+            onKeyUp={reportSelection}
+            onClick={reportSelection}
+            onFocus={reportSelection}
+            onScroll={syncScroll}
+          />
+          <CaretOverlay ref={overlayRef} text={text} peers={peers} />
+        </div>
       </label>
     </section>
   );

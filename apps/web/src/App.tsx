@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import { ConnectionBadge } from "./components/ConnectionBadge.js";
+import { PresenceBar } from "./components/PresenceBar.js";
 import { TextEditor } from "./components/TextEditor.js";
 import { createDocument } from "./sync/api-client.js";
 import {
   DocumentSyncController,
+  initialSnapshot,
   type SyncSnapshot,
 } from "./sync/controller.js";
 
@@ -36,12 +38,7 @@ export default function App() {
     () => (documentId ? new DocumentSyncController(documentId) : undefined),
     [documentId],
   );
-  const [snapshot, setSnapshot] = useState<SyncSnapshot>({
-    connection: "loading",
-    pendingCount: 0,
-    queuedLocalChanges: 0,
-    lastServerSequence: 0,
-  });
+  const [snapshot, setSnapshot] = useState<SyncSnapshot>(initialSnapshot);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string>();
   const [roomInput, setRoomInput] = useState("");
@@ -103,8 +100,8 @@ export default function App() {
         <p className="eyebrow">Local-first shared text</p>
         <h1>Keep writing, even when the network does not.</h1>
         <p className="lede">
-          Converge preserves offline edits and deterministically converges every
-          replica's text after reconnecting.
+          Type together in real time. Converge keeps offline edits and merges
+          everyone's changes character by character after reconnecting.
         </p>
         <div className="landing-actions">
           <div>
@@ -171,11 +168,15 @@ export default function App() {
         </p>
       )}
 
-      {snapshot.document ? (
+      <PresenceBar self={snapshot.self} peers={snapshot.peers} />
+
+      {snapshot.text !== undefined ? (
         <TextEditor
-          document={snapshot.document}
-          queuedLocalChanges={snapshot.queuedLocalChanges}
-          onChange={(change) => controller?.change(change)}
+          text={snapshot.text}
+          selection={snapshot.selection}
+          peers={snapshot.peers}
+          onEdit={(text, caret) => controller?.edit(text, caret)}
+          onSelect={(start, end) => controller?.setSelection(start, end)}
         />
       ) : (
         <section className="editor-card">Loading local replica…</section>

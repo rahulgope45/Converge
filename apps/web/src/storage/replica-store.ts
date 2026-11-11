@@ -30,7 +30,7 @@ function database(): Promise<IDBPDatabase<ConvergeDatabase>> {
 
 function openDatabase(): Promise<IDBPDatabase<ConvergeDatabase>> {
   return new Promise((resolve, reject) => {
-    const opening = openDB<ConvergeDatabase>("converge", 2, {
+    const opening = openDB<ConvergeDatabase>("converge", 3, {
       blocked() {
         // Another tab still holds the previous database version, so this
         // open would otherwise wait silently for that tab to close.
@@ -54,9 +54,9 @@ function openDatabase(): Promise<IDBPDatabase<ConvergeDatabase>> {
           pending.createIndex("documentId", "documentId");
           db.createObjectStore("settings");
         }
-        if (oldVersion === 1) {
-          // Version 1 stored replicas and operations in an older shape that
-          // the shared text model cannot read.
+        if (oldVersion >= 1 && oldVersion < 3) {
+          // Earlier versions stored replicas and operations in shapes that
+          // the character-level text model cannot read.
           void transaction.objectStore("replicas").clear();
           void transaction.objectStore("pendingOperations").clear();
         }
@@ -83,18 +83,22 @@ export async function saveReplica(replica: DocumentReplica): Promise<void> {
   await (await database()).put("replicas", replica, replica.documentId);
 }
 
-export async function saveLocalOperation(
+// Stores a replica together with the local operations that produced it, in
+// one transaction, so the replica is never persisted without the operations
+// still owed to the server.
+export async function saveLocalOperations(
   replica: DocumentReplica,
-  operation: Operation,
+  operations: readonly Operation[],
 ): Promise<void> {
   const db = await database();
   const transaction = db.transaction(
     ["replicas", "pendingOperations"],
     "readwrite",
   );
+  const pending = transaction.objectStore("pendingOperations");
   await Promise.all([
     transaction.objectStore("replicas").put(replica, replica.documentId),
-    transaction.objectStore("pendingOperations").put(operation),
+    ...operations.map((operation) => pending.put(operation)),
     transaction.done,
   ]);
 }
@@ -109,8 +113,13 @@ export async function listPendingOperations(
   );
 }
 
-export async function removePendingOperation(
-  operationId: string,
+export async function removePendingOperations(
+  operationIds: readonly string[],
 ): Promise<void> {
-  await (await database()).delete("pendingOperations", operationId);
+  const db = await database();
+  const transaction = db.transaction("pendingOperations", "readwrite");
+  await Promise.all([
+    ...operationIds.map((operationId) => transaction.store.delete(operationId)),
+    transaction.done,
+  ]);
 }

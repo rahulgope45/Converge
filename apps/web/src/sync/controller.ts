@@ -1,30 +1,35 @@
 import {
+  anchorAt,
   applyOperation,
-  createLocalOperation,
+  createLocalOperations,
   createReplica,
-  projectDocument,
+  indexOfAnchor,
+  textOf,
 } from "@converge/sync-core";
-import type {
-  Document,
-  DocumentReplica,
-  LocalChange,
-  Operation,
-} from "@converge/sync-core";
+import type { CharId, DocumentReplica } from "@converge/sync-core";
 
 import {
   getActorId,
   listPendingOperations,
   loadReplica,
-  removePendingOperation,
-  saveLocalOperation,
+  removePendingOperations,
+  saveLocalOperations,
   saveReplica,
 } from "../storage/replica-store.js";
 import {
+  sanitizeText,
+  toCodePointIndex,
+  toUtf16Offset,
+} from "../text-offsets.js";
+import {
   fetchOperations,
+  MAX_BATCH_SIZE,
   operationStreamURL,
-  submitOperation,
+  submitOperations,
 } from "./api-client.js";
 import type { StoredOperation } from "./api-client.js";
+import { identityFor, parseServerFrame, presenceFrame } from "./presence.js";
+import type { Peer } from "./presence.js";
 
 export type ConnectionState =
   | "loading"
@@ -33,45 +38,70 @@ export type ConnectionState =
   | "online"
   | "error";
 
+// Positions in a snapshot are UTF-16 offsets into `text`, as the DOM uses.
+export type PeerView = {
+  actorId: string;
+  name: string;
+  color: string;
+  // Undefined when the peer has no caret, or it sits on a character this
+  // replica has not received yet.
+  offset?: number;
+};
+
 export type SyncSnapshot = {
-  document?: Document;
+  // Undefined until the local replica has been loaded.
+  text?: string;
+  selection?: { start: number; end: number };
+  self?: { name: string; color: string };
+  peers: PeerView[];
   connection: ConnectionState;
   pendingCount: number;
-  // Local changes accepted by change() that are not yet applied to the replica.
-  queuedLocalChanges: number;
   lastServerSequence: number;
   error?: string;
 };
 
 type Listener = (snapshot: SyncSnapshot) => void;
 
-const initialDocument = (documentId: string): Document => ({
-  id: documentId,
-  text: "",
-});
+const PRESENCE_INTERVAL_MS = 100;
+const CATCH_UP_DELAY_MS = 250;
+
+export const initialSnapshot: SyncSnapshot = {
+  peers: [],
+  connection: "loading",
+  pendingCount: 0,
+  lastServerSequence: 0,
+};
 
 export class DocumentSyncController {
   private actorId = "";
   private replica?: DocumentReplica;
   private socket?: WebSocket;
   private stopped = false;
+
+  private connection: ConnectionState = "loading";
+  private error?: string;
+  private pendingCount = 0;
+  private selection?: { start: CharId | null; end: CharId | null };
+  private readonly peers = new Map<string, Peer>();
+
   private retryAttempt = 0;
-  private queuedLocalChanges = 0;
   private retryTimer?: number;
+  private catchUpTimer?: number;
+  private presenceTimer?: number;
+  private lastPresenceAt = 0;
+
+  // Storage and network work runs one task at a time, in order. Edits and
+  // incoming operations are applied to the in-memory replica immediately and
+  // never wait for this queue.
   private queue: Promise<void> = Promise.resolve();
   private readonly listeners = new Set<Listener>();
-  private snapshot: SyncSnapshot = {
-    connection: "loading",
-    pendingCount: 0,
-    queuedLocalChanges: 0,
-    lastServerSequence: 0,
-  };
+  private snapshot: SyncSnapshot = initialSnapshot;
+
   private readonly handleOffline = () => {
-    this.socket?.close(1001, "network offline");
-    void this.enqueue(async () => {
-      await this.refreshSnapshot("offline");
-      this.scheduleReconnect();
-    });
+    // Browsers only allow close codes 1000 and 3000-4999.
+    this.socket?.close(1000, "network offline");
+    this.setConnection("offline");
+    this.scheduleReconnect();
   };
   private readonly handleOnline = () => this.retry();
 
@@ -89,10 +119,10 @@ export class DocumentSyncController {
     void this.enqueue(async () => {
       this.actorId = await getActorId();
       this.replica =
-        (await loadReplica(this.documentId)) ??
-        createReplica(initialDocument(this.documentId));
+        (await loadReplica(this.documentId)) ?? createReplica(this.documentId);
+      this.pendingCount = (await listPendingOperations(this.documentId)).length;
       await saveReplica(this.replica);
-      await this.refreshSnapshot("offline");
+      this.setConnection("offline");
       await this.synchronize();
     });
   }
@@ -101,8 +131,10 @@ export class DocumentSyncController {
     this.stopped = true;
     window.removeEventListener("offline", this.handleOffline);
     window.removeEventListener("online", this.handleOnline);
-    if (this.retryTimer !== undefined) {
-      window.clearTimeout(this.retryTimer);
+    for (const timer of [this.retryTimer, this.catchUpTimer, this.presenceTimer]) {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     }
     this.socket?.close(1000, "controller stopped");
   }
@@ -120,29 +152,74 @@ export class DocumentSyncController {
     void this.enqueue(() => this.synchronize());
   }
 
-  change(change: LocalChange): void {
-    this.queuedLocalChanges += 1;
+  // Replaces the visible text after the user typed, pasted or deleted.
+  // `caret` is the textarea's caret after the change, as a UTF-16 offset.
+  // The change is applied before this method returns.
+  edit(text: string, caret: number): void {
+    if (!this.replica) {
+      return;
+    }
+
+    const clean = sanitizeText(text);
+    const caretIndex = toCodePointIndex(clean, caret);
+    const operations = createLocalOperations(
+      this.replica,
+      this.actorId,
+      () => crypto.randomUUID(),
+      // A caret measured on text that sanitizing changed may be off, so it is
+      // only used as a hint when the text is exactly what the user typed.
+      { text: clean, caret: clean === text ? caretIndex : undefined },
+    );
+
+    let replica = this.replica;
+    for (const operation of operations) {
+      replica = applyOperation(replica, operation);
+    }
+    this.replica = replica;
+    this.pendingCount += operations.length;
+
+    const anchor = anchorAt(replica, caretIndex);
+    this.selection = { start: anchor, end: anchor };
+
+    if (operations.length === 0) {
+      this.emit();
+      this.schedulePresence();
+      return;
+    }
+
+    // Started in this tick so that no later write can persist the replica
+    // without the operations still owed to the server.
+    const saved = saveLocalOperations(replica, operations);
+    if (this.connection !== "error") {
+      this.connection = navigator.onLine ? "synchronizing" : "offline";
+    }
+    this.emit();
+    this.schedulePresence();
+
     void this.enqueue(async () => {
-      this.queuedLocalChanges -= 1;
-      if (!this.replica) {
-        return;
-      }
-
-      const operation = createLocalOperation(
-        this.replica,
-        this.actorId,
-        crypto.randomUUID(),
-        change,
-      );
-      this.replica = applyOperation(this.replica, operation);
-      await saveLocalOperation(this.replica, operation);
-      await this.refreshSnapshot(navigator.onLine ? "synchronizing" : "offline");
-
+      await saved;
       if (navigator.onLine) {
         await this.flushPending();
-        await this.refreshSnapshot(this.socket?.readyState === WebSocket.OPEN ? "online" : "synchronizing");
+        this.setConnection(
+          this.socket?.readyState === WebSocket.OPEN ? "online" : "synchronizing",
+        );
       }
     });
+  }
+
+  // Records where the user's selection is, as UTF-16 offsets, so it can be
+  // kept on the same characters when other replicas change the text.
+  setSelection(start: number, end: number): void {
+    if (!this.replica) {
+      return;
+    }
+
+    const text = textOf(this.replica);
+    this.selection = {
+      start: anchorAt(this.replica, toCodePointIndex(text, start)),
+      end: anchorAt(this.replica, toCodePointIndex(text, end)),
+    };
+    this.schedulePresence();
   }
 
   private async synchronize(): Promise<void> {
@@ -151,32 +228,28 @@ export class DocumentSyncController {
     }
 
     if (!navigator.onLine) {
-      await this.refreshSnapshot("offline");
+      this.setConnection("offline");
       this.scheduleReconnect();
       return;
     }
 
-    await this.refreshSnapshot("synchronizing");
+    this.setConnection("synchronizing");
     try {
       await this.catchUp();
       await this.flushPending();
       await this.openSocket();
       await this.catchUp();
       this.retryAttempt = 0;
-      await this.refreshSnapshot("online");
+      this.setConnection("online");
     } catch (error) {
-      await this.refreshSnapshot("error", messageFrom(error));
+      this.setConnection("error", messageFrom(error));
       this.scheduleReconnect();
     }
   }
 
   private async catchUp(): Promise<void> {
-    if (!this.replica) {
-      return;
-    }
-
     let hasMore = true;
-    while (hasMore) {
+    while (hasMore && this.replica) {
       const page = await fetchOperations(
         this.documentId,
         this.replica.lastServerSequence,
@@ -185,21 +258,28 @@ export class DocumentSyncController {
         this.applyStored(stored, true);
       }
       hasMore = page.hasMore;
+      this.emit();
       await saveReplica(this.replica);
     }
   }
 
   private async flushPending(): Promise<void> {
-    if (!this.replica) {
-      return;
-    }
+    for (;;) {
+      const pending = await listPendingOperations(this.documentId);
+      if (pending.length === 0) {
+        this.pendingCount = 0;
+        this.emit();
+        return;
+      }
 
-    const pending = await listPendingOperations(this.documentId);
-    pending.sort((left, right) => left.logicalTime - right.logicalTime);
-    for (const operation of pending) {
-      await submitOperation(operation);
-      await removePendingOperation(operation.operationId);
-      await saveReplica(this.replica);
+      // Logical-time order guarantees the server stores an operation after
+      // every earlier local operation it refers to.
+      pending.sort((left, right) => left.logicalTime - right.logicalTime);
+      const batch = pending.slice(0, MAX_BATCH_SIZE);
+      await submitOperations(this.documentId, batch);
+      await removePendingOperations(batch.map((operation) => operation.operationId));
+      this.pendingCount = Math.max(0, this.pendingCount - batch.length);
+      this.emit();
     }
   }
 
@@ -217,20 +297,14 @@ export class DocumentSyncController {
 
       socket.onopen = () => {
         opened = true;
+        this.sendPresence();
         resolve();
       };
 
       socket.onmessage = (event) => {
-        void this.enqueue(async () => {
-          if (this.socket !== socket || !this.replica) {
-            return;
-          }
-          const stored = JSON.parse(String(event.data)) as StoredOperation;
-          this.applyStored(stored, false);
-          await saveReplica(this.replica);
-          await this.catchUp();
-          await this.refreshSnapshot("online");
-        });
+        if (this.socket === socket) {
+          this.handleFrame(String(event.data));
+        }
       };
 
       socket.onclose = () => {
@@ -239,7 +313,8 @@ export class DocumentSyncController {
         }
         if (this.socket === socket && !this.stopped) {
           this.socket = undefined;
-          void this.refreshSnapshot("offline");
+          this.peers.clear();
+          this.setConnection("offline");
           if (opened) {
             this.scheduleReconnect();
           }
@@ -248,6 +323,35 @@ export class DocumentSyncController {
 
       socket.onerror = () => socket.close();
     });
+  }
+
+  private handleFrame(data: string): void {
+    const frame = parseServerFrame(data);
+    if (!frame || !this.replica) {
+      return;
+    }
+
+    switch (frame.kind) {
+      case "operation":
+        // Shown at once. The stream gives no guarantee that nothing was
+        // missed, so the cursor only advances through catch-up, which is
+        // scheduled once for a burst of frames.
+        this.applyStored(frame.stored, false);
+        this.emit();
+        this.scheduleCatchUp();
+        break;
+      case "presence":
+        if (frame.peer.actorId !== this.actorId) {
+          this.peers.set(frame.peer.actorId, frame.peer);
+          this.emit();
+        }
+        break;
+      case "leave":
+        if (this.peers.delete(frame.actorId)) {
+          this.emit();
+        }
+        break;
+    }
   }
 
   private applyStored(stored: StoredOperation, advanceCursor: boolean): void {
@@ -261,6 +365,41 @@ export class DocumentSyncController {
         ? Math.max(this.replica.lastServerSequence, stored.serverSequence)
         : this.replica.lastServerSequence,
     };
+  }
+
+  private scheduleCatchUp(): void {
+    if (this.stopped || this.catchUpTimer !== undefined) {
+      return;
+    }
+
+    this.catchUpTimer = window.setTimeout(() => {
+      this.catchUpTimer = undefined;
+      void this.enqueue(() => this.catchUp());
+    }, CATCH_UP_DELAY_MS);
+  }
+
+  private schedulePresence(): void {
+    if (this.stopped || this.presenceTimer !== undefined) {
+      return;
+    }
+
+    const wait = Math.max(
+      0,
+      this.lastPresenceAt + PRESENCE_INTERVAL_MS - Date.now(),
+    );
+    this.presenceTimer = window.setTimeout(() => {
+      this.presenceTimer = undefined;
+      this.sendPresence();
+    }, wait);
+  }
+
+  private sendPresence(): void {
+    if (this.socket?.readyState !== WebSocket.OPEN || !this.actorId) {
+      return;
+    }
+
+    this.lastPresenceAt = Date.now();
+    this.socket.send(presenceFrame(this.actorId, this.selection?.end));
   }
 
   private scheduleReconnect(): void {
@@ -277,20 +416,44 @@ export class DocumentSyncController {
     }, delay);
   }
 
-  private async refreshSnapshot(
-    connection: ConnectionState,
-    error?: string,
-  ): Promise<void> {
-    const pendingCount = (
-      await listPendingOperations(this.documentId)
-    ).length;
+  private setConnection(connection: ConnectionState, error?: string): void {
+    this.connection = connection;
+    this.error = error;
+    this.emit();
+  }
+
+  private emit(): void {
+    const replica = this.replica;
+    const text = replica ? textOf(replica) : undefined;
+
+    const offsetOf = (anchor: CharId | null | undefined): number | undefined => {
+      if (!replica || text === undefined || anchor === undefined) {
+        return undefined;
+      }
+      const index = indexOfAnchor(replica, anchor);
+      return index === undefined ? undefined : toUtf16Offset(text, index);
+    };
+
+    const start = offsetOf(this.selection?.start);
+    const end = offsetOf(this.selection?.end);
+
     this.snapshot = {
-      document: this.replica ? projectDocument(this.replica) : undefined,
-      connection,
-      pendingCount,
-      queuedLocalChanges: this.queuedLocalChanges,
-      lastServerSequence: this.replica?.lastServerSequence ?? 0,
-      error,
+      text,
+      selection:
+        start === undefined || end === undefined
+          ? undefined
+          : { start: Math.min(start, end), end: Math.max(start, end) },
+      self: this.actorId ? identityFor(this.actorId) : undefined,
+      peers: [...this.peers.values()].map((peer) => ({
+        actorId: peer.actorId,
+        name: peer.name,
+        color: peer.color,
+        offset: offsetOf(peer.anchor),
+      })),
+      connection: this.connection,
+      pendingCount: this.pendingCount,
+      lastServerSequence: replica?.lastServerSequence ?? 0,
+      error: this.error,
     };
     for (const listener of this.listeners) {
       listener(this.snapshot);
@@ -299,8 +462,8 @@ export class DocumentSyncController {
 
   private enqueue(task: () => Promise<void>): Promise<void> {
     const next = this.queue.then(task, task);
-    this.queue = next.catch(async (error) => {
-      await this.refreshSnapshot("error", messageFrom(error));
+    this.queue = next.catch((error) => {
+      this.setConnection("error", messageFrom(error));
       this.scheduleReconnect();
     });
     return next;
