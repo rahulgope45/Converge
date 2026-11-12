@@ -146,6 +146,13 @@ cd apps/server
 go run ./cmd/server
 ```
 
+```bash
+Linux - loading up the env
+set -a
+source env Filepath
+set +a
+```
+
 Expected local address:
 
 ```text
