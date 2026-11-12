@@ -6,7 +6,7 @@ import {
   indexOfAnchor,
   textOf,
 } from "@converge/sync-core";
-import type { CharId, DocumentReplica } from "@converge/sync-core";
+import type { CharId, DocumentReplica, Operation } from "@converge/sync-core";
 
 import {
   getActorId,
@@ -23,11 +23,13 @@ import {
 } from "../text-offsets.js";
 import {
   fetchOperations,
+  MAX_BATCH_BYTES,
   MAX_BATCH_SIZE,
   operationStreamURL,
   submitOperations,
 } from "./api-client.js";
 import type { StoredOperation } from "./api-client.js";
+import { sendBatch, takeBatch } from "./outbox.js";
 import { identityFor, parseServerFrame, presenceFrame } from "./presence.js";
 import type { Peer } from "./presence.js";
 
@@ -58,6 +60,8 @@ export type SyncSnapshot = {
   pendingCount: number;
   lastServerSequence: number;
   error?: string;
+  // Something the user should know that is not a connection failure.
+  notice?: string;
 };
 
 type Listener = (snapshot: SyncSnapshot) => void;
@@ -80,7 +84,15 @@ export class DocumentSyncController {
 
   private connection: ConnectionState = "loading";
   private error?: string;
+  private notice?: string;
   private pendingCount = 0;
+  // Local operations whose write to storage is still in flight.
+  private savingCount = 0;
+  // Local operations whose write to storage failed. They are applied in
+  // memory and are written again before anything else is persisted or sent.
+  private unsaved: Operation[] = [];
+  // Local operations created while the replica is being rebuilt.
+  private createdDuringRebuild?: Operation[];
   private selection?: { start: CharId | null; end: CharId | null };
   private readonly peers = new Map<string, Peer>();
 
@@ -177,6 +189,7 @@ export class DocumentSyncController {
     }
     this.replica = replica;
     this.pendingCount += operations.length;
+    this.createdDuringRebuild?.push(...operations);
 
     const anchor = anchorAt(replica, caretIndex);
     this.selection = { start: anchor, end: anchor };
@@ -189,7 +202,16 @@ export class DocumentSyncController {
 
     // Started in this tick so that no later write can persist the replica
     // without the operations still owed to the server.
-    const saved = saveLocalOperations(replica, operations);
+    this.savingCount += operations.length;
+    const saved = saveLocalOperations(replica, operations).then(
+      () => {
+        this.savingCount -= operations.length;
+      },
+      () => {
+        this.savingCount -= operations.length;
+        this.unsaved.push(...operations);
+      },
+    );
     if (this.connection !== "error") {
       this.connection = navigator.onLine ? "synchronizing" : "offline";
     }
@@ -259,28 +281,111 @@ export class DocumentSyncController {
       }
       hasMore = page.hasMore;
       this.emit();
-      await saveReplica(this.replica);
+      await this.persist();
     }
   }
 
+  // Writes the replica to storage, together with any local operations an
+  // earlier write failed to store, so it is never persisted without them.
+  private async persist(): Promise<void> {
+    if (!this.replica) {
+      return;
+    }
+    if (this.unsaved.length === 0) {
+      await saveReplica(this.replica);
+      return;
+    }
+
+    const operations = [...this.unsaved];
+    await saveLocalOperations(this.replica, operations);
+    this.unsaved = this.unsaved.slice(operations.length);
+  }
+
   private async flushPending(): Promise<void> {
+    if (this.unsaved.length > 0) {
+      await this.persist();
+    }
+
+    let rejectedCount = 0;
     for (;;) {
       const pending = await listPendingOperations(this.documentId);
       if (pending.length === 0) {
-        this.pendingCount = 0;
+        // Edits made during this flush may not be in storage yet.
+        this.pendingCount = this.savingCount + this.unsaved.length;
         this.emit();
-        return;
+        break;
       }
 
       // Logical-time order guarantees the server stores an operation after
       // every earlier local operation it refers to.
       pending.sort((left, right) => left.logicalTime - right.logicalTime);
-      const batch = pending.slice(0, MAX_BATCH_SIZE);
-      await submitOperations(this.documentId, batch);
+      const batch = takeBatch(pending, MAX_BATCH_SIZE, MAX_BATCH_BYTES);
+      const rejected = await sendBatch(batch, (operations) =>
+        submitOperations(this.documentId, operations),
+      );
+      // Refused operations leave the queue too: sending them again cannot
+      // succeed, and keeping them would block every later edit.
       await removePendingOperations(batch.map((operation) => operation.operationId));
+      rejectedCount += rejected.length;
       this.pendingCount = Math.max(0, this.pendingCount - batch.length);
       this.emit();
     }
+
+    if (rejectedCount > 0) {
+      await this.rebuildFromServer();
+      this.notice =
+        rejectedCount === 1
+          ? "The server refused one of your edits, so it was removed. The text now shows what everyone else sees."
+          : `The server refused ${rejectedCount} of your edits, so they were removed. The text now shows what everyone else sees.`;
+      this.emit();
+    }
+  }
+
+  // Replaces the replica with one built only from what the server holds,
+  // plus local operations still waiting to be sent. Used after the server
+  // refused an operation: this replica had applied it and no other replica
+  // ever will, so keeping it would leave this one permanently different.
+  private async rebuildFromServer(): Promise<void> {
+    if (!this.replica) {
+      return;
+    }
+
+    this.createdDuringRebuild = [];
+    try {
+      let rebuilt = createReplica(this.documentId);
+      for (let hasMore = true; hasMore; ) {
+        const page = await fetchOperations(this.documentId, rebuilt.lastServerSequence);
+        for (const stored of page.operations) {
+          rebuilt = {
+            ...applyOperation(rebuilt, stored.operation),
+            lastServerSequence: Math.max(
+              rebuilt.lastServerSequence,
+              stored.serverSequence,
+            ),
+          };
+        }
+        hasMore = page.hasMore;
+      }
+
+      const waiting = await listPendingOperations(this.documentId);
+      // No await from here to the assignment, so no edit can slip between.
+      // Applying an operation twice is harmless.
+      const local = [...waiting, ...this.unsaved, ...this.createdDuringRebuild];
+      local.sort((left, right) => left.logicalTime - right.logicalTime);
+      for (const operation of local) {
+        rebuilt = applyOperation(rebuilt, operation);
+      }
+      // The clock never moves back, so ids of refused characters are not reused.
+      this.replica = {
+        ...rebuilt,
+        localClock: Math.max(rebuilt.localClock, this.replica.localClock),
+      };
+    } finally {
+      this.createdDuringRebuild = undefined;
+    }
+
+    this.emit();
+    await this.persist();
   }
 
   private openSocket(): Promise<void> {
@@ -289,6 +394,12 @@ export class DocumentSyncController {
     }
 
     this.socket?.close(1000, "reconnecting");
+    // Leave frames for these peers would arrive on the socket being replaced
+    // and be ignored; the new connection replays everyone still present.
+    if (this.peers.size > 0) {
+      this.peers.clear();
+      this.emit();
+    }
     const socket = new WebSocket(operationStreamURL(this.documentId));
     this.socket = socket;
 
@@ -454,6 +565,7 @@ export class DocumentSyncController {
       pendingCount: this.pendingCount,
       lastServerSequence: replica?.lastServerSequence ?? 0,
       error: this.error,
+      notice: this.notice,
     };
     for (const listener of this.listeners) {
       listener(this.snapshot);

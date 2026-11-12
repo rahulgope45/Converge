@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/rahulgope45/converge/apps/server/internal/protocol"
 )
 
 const testRoom = "room-1"
@@ -183,4 +184,55 @@ func (h *Hub) roomSize(documentID string) int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients[documentID])
+}
+
+func TestUnresponsivePeerIsDroppedAndItsLeaveAnnounced(t *testing.T) {
+	server := newTestServer(t)
+	server.hub.pingInterval = 50 * time.Millisecond
+	server.hub.pingTimeout = 100 * time.Millisecond
+
+	observer := server.join(t)
+	// This client never reads, so it never answers a ping: the same as a
+	// peer whose network vanished without closing the connection.
+	silent := server.join(t)
+	send(t, silent, `{"type":"presence","actorId":"silent","name":"Silent Fox","color":"#2563eb"}`)
+
+	if frame := receive(t, observer); frame["type"] != "presence" {
+		t.Fatalf("frame = %v, want presence", frame)
+	}
+	frame := receive(t, observer)
+	if frame["type"] != "presence_leave" || frame["actorId"] != "silent" {
+		t.Fatalf("frame = %v, want presence_leave for silent", frame)
+	}
+}
+
+func TestSlowClientIsDroppedWithoutBlockingTheSender(t *testing.T) {
+	server := newTestServer(t)
+	// Never reads, so its queue fills and a close handshake gets no answer.
+	_ = server.join(t)
+
+	operation := protocol.StoredOperation{Operation: protocol.Operation{
+		Kind:  protocol.KindInsertText,
+		Value: json.RawMessage(`{"after":null,"text":"` + strings.Repeat("x", 60000) + `"}`),
+	}}
+	var slowest time.Duration
+	for range 2000 {
+		started := time.Now()
+		server.hub.Broadcast(testRoom, operation)
+		slowest = max(slowest, time.Since(started))
+		if server.hub.roomSize(testRoom) == 0 {
+			break
+		}
+	}
+
+	if slowest > 500*time.Millisecond {
+		t.Fatalf("a broadcast blocked for %v", slowest)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for server.hub.roomSize(testRoom) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("slow client is still registered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }

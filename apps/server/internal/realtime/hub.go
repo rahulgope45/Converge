@@ -13,7 +13,9 @@ import (
 	"github.com/rahulgope45/converge/apps/server/internal/protocol"
 )
 
-const outboundQueueSize = 64
+// Large enough for a full batch of operations (protocol.MaxBatchSize)
+// broadcast at once, with room for presence around it.
+const outboundQueueSize = 256
 
 type client struct {
 	connection *websocket.Conn
@@ -29,12 +31,19 @@ type Hub struct {
 	mu      sync.RWMutex
 	clients map[string]map[*client]struct{}
 	logger  *slog.Logger
+
+	// Each connection is pinged every pingInterval and dropped when no pong
+	// arrives within pingTimeout. Set before the first connection.
+	pingInterval time.Duration
+	pingTimeout  time.Duration
 }
 
 func NewHub(logger *slog.Logger) *Hub {
 	return &Hub{
-		clients: make(map[string]map[*client]struct{}),
-		logger:  logger,
+		clients:      make(map[string]map[*client]struct{}),
+		logger:       logger,
+		pingInterval: 15 * time.Second,
+		pingTimeout:  10 * time.Second,
 	}
 }
 
@@ -65,14 +74,18 @@ func (h *Hub) Serve(
 	h.logger.Info("websocket connected", "document_id", documentID)
 	defer h.logger.Info("websocket disconnected", "document_id", documentID)
 
+	ctx, cancel := context.WithCancel(request.Context())
+	defer cancel()
+
 	go func() {
-		if err := connectedClient.writeLoop(request.Context()); err != nil {
-			connectedClient.close(websocket.StatusInternalError, "write failed")
+		if err := connectedClient.writeLoop(ctx); err != nil {
+			connectedClient.drop()
 		}
 	}()
+	go h.keepAlive(ctx, connectedClient)
 
 	for {
-		_, data, err := connection.Read(request.Context())
+		_, data, err := connection.Read(ctx)
 		if err != nil {
 			return err
 		}
@@ -117,7 +130,9 @@ func (h *Hub) send(documentID string, clients []*client, message []byte) {
 		case connectedClient.outbound <- message:
 		default:
 			h.logger.Warn("closing slow websocket client", "document_id", documentID)
-			connectedClient.close(websocket.StatusPolicyViolation, "outbound queue full")
+			// Without a close handshake: this client is not reading, and
+			// waiting for it would stall whoever is sending.
+			connectedClient.drop()
 		}
 	}
 }
@@ -205,6 +220,36 @@ func (connectedClient *client) close(status websocket.StatusCode, reason string)
 	connectedClient.closeOnce.Do(func() {
 		_ = connectedClient.connection.Close(status, reason)
 	})
+}
+
+// drop closes the connection at once, without a close handshake.
+func (connectedClient *client) drop() {
+	connectedClient.closeOnce.Do(func() {
+		_ = connectedClient.connection.CloseNow()
+	})
+}
+
+// keepAlive pings the client until ctx ends and drops it when a pong does
+// not arrive in time, so a peer whose network vanished is noticed and its
+// leave announced. The pong is read by the Read loop in Serve.
+func (h *Hub) keepAlive(ctx context.Context, connectedClient *client) {
+	ticker := time.NewTicker(h.pingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingContext, cancel := context.WithTimeout(ctx, h.pingTimeout)
+			err := connectedClient.connection.Ping(pingContext)
+			cancel()
+			if err != nil {
+				connectedClient.drop()
+				return
+			}
+		}
+	}
 }
 
 func IsNormalClose(err error) bool {

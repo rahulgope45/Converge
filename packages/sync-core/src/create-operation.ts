@@ -7,25 +7,51 @@ import type {
   TextEdit,
 } from "./model.js";
 
-function spansOf(elements: readonly Element[]): DeleteSpan[] {
-  const spans: DeleteSpan[] = [];
+// Limits the server enforces on one delete operation.
+export const MAX_DELETE_SPANS = 1000;
+export const MAX_DELETE_LENGTH = 10000;
+
+// Groups the elements into runs of consecutive ids, split into as many
+// lists as needed for each to fit in one delete operation.
+function spanChunksOf(elements: readonly Element[]): DeleteSpan[][] {
+  const chunks: DeleteSpan[][] = [];
+  let spans: DeleteSpan[] = [];
+  let length = 0;
+
   for (const { id } of elements) {
     const last = spans[spans.length - 1];
-    if (
-      last &&
+    const extendsLast =
+      last !== undefined &&
       last.actorId === id.actorId &&
-      last.from + last.length === id.logicalTime
+      last.from + last.length === id.logicalTime;
+
+    if (
+      length === MAX_DELETE_LENGTH ||
+      (!extendsLast && spans.length === MAX_DELETE_SPANS)
     ) {
+      chunks.push(spans);
+      spans = [{ actorId: id.actorId, from: id.logicalTime, length: 1 }];
+      length = 1;
+      continue;
+    }
+
+    if (extendsLast) {
       last.length += 1;
     } else {
       spans.push({ actorId: id.actorId, from: id.logicalTime, length: 1 });
     }
+    length += 1;
   }
-  return spans;
+
+  if (spans.length > 0) {
+    chunks.push(spans);
+  }
+  return chunks;
 }
 
-// Describes a local change of the visible text as operations: at most one
-// delete followed by at most one insert. The replica is not modified; the
+// Describes a local change of the visible text as operations: the deletes
+// (one unless the removed text exceeds a server limit) followed by at most
+// one insert. The replica is not modified; the
 // caller applies the returned operations in order.
 export function createLocalOperations(
   replica: DocumentReplica,
@@ -43,16 +69,15 @@ export function createLocalOperations(
   const operations: Operation[] = [];
   let logicalTime = replica.localClock + 1;
 
-  if (change.removed > 0) {
+  const removed = visible.slice(change.start, change.start + change.removed);
+  for (const spans of spanChunksOf(removed)) {
     operations.push({
       operationId: newOperationId(),
       documentId: replica.documentId,
       actorId,
       logicalTime,
       kind: "delete_text",
-      value: {
-        spans: spansOf(visible.slice(change.start, change.start + change.removed)),
-      },
+      value: { spans },
     });
     logicalTime += 1;
   }

@@ -6,9 +6,11 @@ const (
 	KindInsertText = "insert_text"
 	KindDeleteText = "delete_text"
 
-	// MaxTextLength limits one insert and one delete span, in Unicode code points.
-	MaxTextLength    = 10000
-	MaxDeleteSpans   = 1000
+	// MaxTextLength limits one insert, in Unicode code points.
+	MaxTextLength  = 10000
+	MaxDeleteSpans = 1000
+	// MaxDeleteLength limits the characters one delete removes, over all spans.
+	MaxDeleteLength  = 10000
 	MaxBatchSize     = 100
 	MaxActorIDLength = 100
 )

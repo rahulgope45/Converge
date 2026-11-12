@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { MAX_DELETE_LENGTH, MAX_DELETE_SPANS } from "./create-operation.js";
+import type { DeleteTextOperation, Operation } from "./model.js";
 import { textOf } from "./replica.js";
-import { edit, emptyReplica } from "./test-helpers.js";
+import { applyAll, edit, emptyReplica, insertAt } from "./test-helpers.js";
 
 function replicaWith(text: string) {
   return edit(emptyReplica(), "a", { text }).replica;
@@ -113,5 +115,54 @@ describe("createLocalOperations", () => {
 
     expect(operations[0]!.logicalTime).toBe(base.localClock + 1);
     expect(replica.localClock).toBe(base.localClock + 2);
+  });
+});
+
+function deletesOf(operations: readonly Operation[]): DeleteTextOperation[] {
+  return operations.filter(
+    (operation): operation is DeleteTextOperation => operation.kind === "delete_text",
+  );
+}
+
+describe("createLocalOperations limits", () => {
+  it("splits a delete so no operation exceeds the server's span limit", () => {
+    // Two people typing alternately: every character is its own span.
+    let replica = emptyReplica();
+    const history: Operation[] = [];
+    for (let index = 0; index < 2 * MAX_DELETE_SPANS + 200; index += 1) {
+      const step = insertAt(replica, index % 2 === 0 ? "a" : "b", index, "x");
+      replica = step.replica;
+      history.push(...step.operations);
+    }
+
+    const cleared = edit(replica, "a", { text: "" });
+    const deletes = deletesOf(cleared.operations);
+
+    expect(deletes).toHaveLength(3);
+    for (const operation of deletes) {
+      expect(operation.value.spans.length).toBeLessThanOrEqual(MAX_DELETE_SPANS);
+    }
+    expect(new Set(cleared.operations.map((o) => o.logicalTime)).size).toBe(3);
+    expect(textOf(cleared.replica)).toBe("");
+    expect(textOf(applyAll(applyAll(emptyReplica(), history), cleared.operations))).toBe("");
+  });
+
+  it("splits a delete so no operation removes more than the length limit", () => {
+    // One person's consecutive inserts form a single span longer than the limit.
+    let replica = emptyReplica();
+    for (let round = 0; round < 3; round += 1) {
+      replica = insertAt(replica, "a", Number.MAX_SAFE_INTEGER, "x".repeat(MAX_DELETE_LENGTH - 1)).replica;
+    }
+
+    const cleared = edit(replica, "a", { text: "keep" });
+    const deletes = deletesOf(cleared.operations);
+
+    expect(deletes).toHaveLength(3);
+    for (const operation of deletes) {
+      const total = operation.value.spans.reduce((sum, span) => sum + span.length, 0);
+      expect(total).toBeLessThanOrEqual(MAX_DELETE_LENGTH);
+    }
+    expect(cleared.operations.at(-1)).toMatchObject({ kind: "insert_text" });
+    expect(textOf(cleared.replica)).toBe("keep");
   });
 });

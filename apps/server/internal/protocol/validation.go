@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"strings"
 	"unicode/utf8"
@@ -107,6 +108,7 @@ func validateDelete(raw json.RawMessage) error {
 	if len(value.Spans) == 0 || len(value.Spans) > MaxDeleteSpans {
 		return fmt.Errorf("spans must contain 1 to %d spans", MaxDeleteSpans)
 	}
+	var total int64
 	for index, span := range value.Spans {
 		if !validActorID(span.ActorID) {
 			return fmt.Errorf("spans[%d]: actorId must contain 1 to %d characters", index, MaxActorIDLength)
@@ -114,9 +116,13 @@ func validateDelete(raw json.RawMessage) error {
 		if span.From == nil || *span.From < 0 {
 			return fmt.Errorf("spans[%d]: from must be a non-negative integer", index)
 		}
-		if span.Length < 1 || span.Length > MaxTextLength {
-			return fmt.Errorf("spans[%d]: length must be 1 to %d", index, MaxTextLength)
+		if span.Length < 1 || span.Length > MaxDeleteLength {
+			return fmt.Errorf("spans[%d]: length must be 1 to %d", index, MaxDeleteLength)
 		}
+		total += span.Length
+	}
+	if total > MaxDeleteLength {
+		return fmt.Errorf("spans must cover at most %d characters in total", MaxDeleteLength)
 	}
 	return nil
 }
@@ -143,14 +149,53 @@ func decodeStrict(reader io.Reader, target any) error {
 }
 
 // EqualJSON reports whether two JSON documents hold the same value,
-// whatever their key order, spacing or string escaping.
+// whatever their key order, spacing, string escaping or number notation.
 func EqualJSON(left, right json.RawMessage) bool {
-	var leftValue, rightValue any
-	if err := json.Unmarshal(left, &leftValue); err != nil {
+	leftValue, err := decodeComparable(left)
+	if err != nil {
 		return false
 	}
-	if err := json.Unmarshal(right, &rightValue); err != nil {
+	rightValue, err := decodeComparable(right)
+	if err != nil {
 		return false
 	}
 	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+func decodeComparable(raw json.RawMessage) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return comparable(value), nil
+}
+
+// comparable replaces every number with an int64 when it is one exactly, so
+// large integers are not rounded, and with a float64 otherwise.
+func comparable(value any) any {
+	switch typed := value.(type) {
+	case json.Number:
+		if integer, err := typed.Int64(); err == nil {
+			return integer
+		}
+		float, err := typed.Float64()
+		if err != nil {
+			return typed.String()
+		}
+		if integer := int64(float); float64(integer) == float && math.Abs(float) < 1<<53 {
+			return integer
+		}
+		return float
+	case map[string]any:
+		for key, item := range typed {
+			typed[key] = comparable(item)
+		}
+	case []any:
+		for index, item := range typed {
+			typed[index] = comparable(item)
+		}
+	}
+	return value
 }

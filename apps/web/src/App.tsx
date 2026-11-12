@@ -194,6 +194,7 @@ export default function App() {
       </section>
 
       {snapshot.error && <p className="error-message">{snapshot.error}</p>}
+      {snapshot.notice && <p className="error-message">{snapshot.notice}</p>}
     </main>
   );
 }

@@ -42,7 +42,8 @@ func TestValidateOperation(t *testing.T) {
 		{"insert plain string", "insert_text", `"hello"`, true},
 
 		{"delete one span", "delete_text", `{"spans":[{"actorId":"a","from":3,"length":2}]}`, false},
-		{"delete two spans", "delete_text", `{"spans":[{"actorId":"a","from":0,"length":1},{"actorId":"b","from":9,"length":10000}]}`, false},
+		{"delete two spans", "delete_text", `{"spans":[{"actorId":"a","from":0,"length":1},{"actorId":"b","from":9,"length":9999}]}`, false},
+		{"delete total length too long", "delete_text", `{"spans":[{"actorId":"a","from":0,"length":1},{"actorId":"b","from":9,"length":10000}]}`, true},
 		{"delete no spans", "delete_text", `{"spans":[]}`, true},
 		{"delete missing spans", "delete_text", `{}`, true},
 		{"delete zero length", "delete_text", `{"spans":[{"actorId":"a","from":3,"length":0}]}`, true},
@@ -139,6 +140,8 @@ func TestEqualJSON(t *testing.T) {
 		{"different text", `{"after":null,"text":"x"}`, `{"after":null,"text":"y"}`, false},
 		{"different span order", `{"spans":[{"actorId":"a","from":1,"length":1},{"actorId":"b","from":1,"length":1}]}`, `{"spans":[{"actorId":"b","from":1,"length":1},{"actorId":"a","from":1,"length":1}]}`, false},
 		{"invalid json", `{`, `{`, false},
+		{"integers above 2^53 that differ", `{"from":9007199254740993}`, `{"from":9007199254740992}`, false},
+		{"same number written differently", `{"from":100}`, `{"from":1e2}`, true},
 	}
 
 	for _, test := range tests {
