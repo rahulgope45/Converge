@@ -1,27 +1,25 @@
-import type { Incident, IncidentReplica, Version } from "./model.js";
+import type { Document, DocumentReplica } from "./model.js";
 
-const initialVersion: Version = {
-  logicalTime: 0,
-  actorId: "",
-};
-
-export function createReplica(incident: Incident): IncidentReplica {
+export function createReplica(documentId: string): DocumentReplica {
   return {
-    documentId: incident.id,
-    title: { value: incident.title, version: initialVersion },
-    status: { value: incident.status, version: initialVersion },
-    severity: { value: incident.severity, version: initialVersion },
+    documentId,
+    elements: [],
     localClock: 0,
     lastServerSequence: 0,
-    appliedOperationIds: [],
+    orphans: [],
   };
 }
 
-export function projectIncident(replica: IncidentReplica): Incident {
-  return {
-    id: replica.documentId,
-    title: replica.title.value,
-    status: replica.status.value,
-    severity: replica.severity.value,
-  };
+export function textOf(replica: DocumentReplica): string {
+  let text = "";
+  for (const element of replica.elements) {
+    if (!element.deleted) {
+      text += element.value;
+    }
+  }
+  return text;
+}
+
+export function projectDocument(replica: DocumentReplica): Document {
+  return { id: replica.documentId, text: textOf(replica) };
 }

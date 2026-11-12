@@ -1,16 +1,6 @@
-export type IncidentStatus =
-  | "investigating"
-  | "identified"
-  | "monitoring"
-  | "resolved";
-
-export type IncidentSeverity = "SEV1" | "SEV2" | "SEV3";
-
-export type Incident = {
+export type Document = {
   id: string;
-  title: string;
-  status: IncidentStatus;
-  severity: IncidentSeverity;
+  text: string;
 };
 
 export type Version = {
@@ -18,19 +8,25 @@ export type Version = {
   actorId: string;
 };
 
-export type Register<T> = {
-  value: T;
-  version: Version;
+// Identifies one character forever. Ordered by logical time, then actor.
+export type CharId = Version;
+
+export type Element = {
+  id: CharId;
+  // Exactly one Unicode code point.
+  value: string;
+  deleted: boolean;
 };
 
-export type IncidentReplica = {
+export type DocumentReplica = {
   documentId: string;
-  title: Register<string>;
-  status: Register<IncidentStatus>;
-  severity: Register<IncidentSeverity>;
+  // Document order. Deleted elements stay as tombstones so that later
+  // operations can still be placed relative to them.
+  elements: readonly Element[];
   localClock: number;
   lastServerSequence: number;
-  appliedOperationIds: readonly string[];
+  // Operations received before the characters they depend on.
+  orphans: readonly Operation[];
 };
 
 type OperationMetadata = {
@@ -40,22 +36,30 @@ type OperationMetadata = {
   logicalTime: number;
 };
 
-export type SetTitleOperation = OperationMetadata & {
-  kind: "set_title";
-  value: string;
+// Inserts a run of characters. The i-th code point of `text` gets the id
+// (logicalTime + i, actorId). `after: null` is the start of the document.
+export type InsertTextOperation = OperationMetadata & {
+  kind: "insert_text";
+  value: { after: CharId | null; text: string };
 };
 
-export type SetStatusOperation = OperationMetadata & {
-  kind: "set_status";
-  value: IncidentStatus;
+export type DeleteSpan = {
+  actorId: string;
+  from: number;
+  length: number;
 };
 
-export type SetSeverityOperation = OperationMetadata & {
-  kind: "set_severity";
-  value: IncidentSeverity;
+// Deletes the characters with ids (from .. from + length - 1, actorId).
+export type DeleteTextOperation = OperationMetadata & {
+  kind: "delete_text";
+  value: { spans: DeleteSpan[] };
 };
 
-export type Operation =
-  | SetTitleOperation
-  | SetStatusOperation
-  | SetSeverityOperation;
+export type Operation = InsertTextOperation | DeleteTextOperation;
+
+// A new visible text for the document. `caret` is the code-point index of
+// the caret after the change, used to locate edits inside repeated text.
+export type TextEdit = {
+  text: string;
+  caret?: number;
+};

@@ -18,6 +18,7 @@ import (
 
 const (
 	maxRequestBody = 64 << 10
+	maxBatchBody   = 1 << 20
 	operationLimit = 500
 )
 
@@ -45,6 +46,7 @@ func New(
 	mux.HandleFunc("GET /ready", server.ready)
 	mux.HandleFunc("POST /api/v1/documents", server.createDocument)
 	mux.HandleFunc("POST /api/v1/documents/{documentId}/operations", server.submitOperation)
+	mux.HandleFunc("POST /api/v1/documents/{documentId}/operations/batch", server.submitBatch)
 	mux.HandleFunc("GET /api/v1/documents/{documentId}/operations", server.listOperations)
 	mux.HandleFunc("GET /api/v1/documents/{documentId}/stream", server.streamOperations)
 
@@ -128,6 +130,66 @@ func (s *Server) submitOperation(writer http.ResponseWriter, request *http.Reque
 		"serverSequence": result.ServerSequence,
 		"duplicate":      result.Duplicate,
 	})
+}
+
+// submitBatch stores several operations in order. Every operation is
+// validated before any is stored. Storing is idempotent per operation, so a
+// client whose batch fails part-way simply sends the whole batch again.
+func (s *Server) submitBatch(writer http.ResponseWriter, request *http.Request) {
+	documentID := request.PathValue("documentId")
+	if _, err := uuid.Parse(documentID); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_document_id", "documentId must be a UUID")
+		return
+	}
+
+	request.Body = http.MaxBytesReader(writer, request.Body, maxBatchBody)
+	operations, err := protocol.DecodeBatch(request.Body)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "request body too large") {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeError(writer, status, "invalid_operation", err.Error())
+		return
+	}
+	for _, operation := range operations {
+		if operation.DocumentID != documentID {
+			writeError(writer, http.StatusBadRequest, "document_id_mismatch", "path and operation document IDs must match")
+			return
+		}
+	}
+
+	results := make([]map[string]any, 0, len(operations))
+	for _, operation := range operations {
+		result, err := s.store.StoreOperation(request.Context(), operation)
+		if errors.Is(err, store.ErrDocumentNotFound) {
+			writeError(writer, http.StatusNotFound, "document_not_found", "document does not exist")
+			return
+		}
+		if errors.Is(err, store.ErrOperationConflict) {
+			writeError(writer, http.StatusConflict, "operation_id_conflict", err.Error())
+			return
+		}
+		if err != nil {
+			s.logger.Error("store operation", "operation_id", operation.OperationID, "error", err)
+			writeError(writer, http.StatusInternalServerError, "internal_error", "could not store operation")
+			return
+		}
+
+		if !result.Duplicate {
+			s.hub.Broadcast(documentID, protocol.StoredOperation{
+				ServerSequence: result.ServerSequence,
+				Operation:      operation,
+			})
+		}
+		results = append(results, map[string]any{
+			"operationId":    operation.OperationID,
+			"serverSequence": result.ServerSequence,
+			"duplicate":      result.Duplicate,
+		})
+	}
+
+	writeJSON(writer, http.StatusOK, map[string]any{"results": results})
 }
 
 func (s *Server) streamOperations(writer http.ResponseWriter, request *http.Request) {

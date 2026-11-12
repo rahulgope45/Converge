@@ -1,17 +1,21 @@
+export { anchorAt, indexOfAnchor } from "./anchors.js";
 export { applyOperation } from "./apply-operation.js";
 export { compareVersion } from "./compare-version.js";
-export { createLocalOperation } from "./create-operation.js";
-export { createReplica, projectIncident } from "./replica.js";
-export type { LocalChange } from "./create-operation.js";
+export {
+  createLocalOperations,
+  MAX_DELETE_LENGTH,
+  MAX_DELETE_SPANS,
+} from "./create-operation.js";
+export { createReplica, projectDocument, textOf } from "./replica.js";
 export type {
-  Incident,
-  IncidentReplica,
-  IncidentSeverity,
-  IncidentStatus,
+  CharId,
+  DeleteSpan,
+  DeleteTextOperation,
+  Document,
+  DocumentReplica,
+  Element,
+  InsertTextOperation,
   Operation,
-  Register,
-  SetSeverityOperation,
-  SetStatusOperation,
-  SetTitleOperation,
+  TextEdit,
   Version,
 } from "./model.js";
